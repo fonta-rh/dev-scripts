@@ -44,10 +44,10 @@ set -x
 # OPENSHIFT_RELEASE_STREAM -
 # Select a different release stream from which to pull the latest image, if the
 # image name is not specified.
-# Default: 4.20
+# Default: 4.22
 # NOTE: Do not use for arm64, instead override OPENSHIFT_RELEASE_IMAGE
 #
-#export OPENSHIFT_RELEASE_STREAM=4.20
+#export OPENSHIFT_RELEASE_STREAM=4.22
 
 # OPENSHIFT_RELEASE_TYPE -
 # Select a different release type from which to pull the latest image.
@@ -160,6 +160,11 @@ set -x
 # The version of go to be installed. The default value is 1.21.7
 #
 #export GO_VERSION="1.21.6"
+
+# Go download mirror to use
+# The url to use to download the golang binary. The default value is https://go.dev/dl
+#
+#export GO_CUSTOM_MIRROR="https://go.dev/dl"
 
 ################################################################################
 ## General Settings
@@ -422,6 +427,16 @@ set -x
 # When set to any value this will cause dev-scripts to include duplicate nics
 # on the primary network. This is intended for testing bonded network configs
 # and may not work without a bond config.
+# export BOND_PRIMARY_INTERFACE=1
+
+# EXTERNAL_LOADBALANCER -
+# When set to any value this will cause dev-scripts to configure an haproxy
+# loadbalancer on the host and configure the cluster to use it instead of the
+# internal loadbalancer.
+# Because of the way the loadbalancer config is written, this only works when
+# using single stack (either ipv4 or ipv6) and a static bootstrap IP (see the
+# ENABLE_BOOTSTRAP_STATIC_IP option above).
+# export EXTERNAL_LOADBALANCER=1
 
 ################################################################################
 ## VM Settings
@@ -465,16 +480,6 @@ set -x
 #
 #export NODES_PLATFORM=baremetal
 
-# ENABLE_ARBITER -
-# Set to any non zero length string value to enable the creation of an arbiter node.
-# Arbiter nodes take the place of a master node but run only critical containers to maintain HA for the cluster,
-# it is a TechPreview feature so `export FEATURE_SET="TechPreviewNoUpgrade"` must be set.
-#
-# Furthermore, since an Arbiter node takes the place of a master node the NUM_MASTERS count
-# must be set to `export NUM_MASTERS=2` and not the default `3` to avoid even number etcd members.
-#
-#export ENABLE_ARBITER=1
-
 # ENABLE_WORKLOAD_PARTITIONING -
 # Set to any non zero length string value to enable workload partitioning in the install config.
 #
@@ -507,6 +512,24 @@ set -x
 #
 #ADDITIONAL_CAPABILITIES=baremetal,Console
 
+# FEATURE_SET -
+# Enable a feature set for the cluster. Feature sets are a collection of features that
+# are enabled together.
+# Default: Undefined (uses the default feature set)
+#
+# For more info see:
+# https://docs.openshift.com/container-platform/latest/nodes/clusters/nodes-cluster-enabling-features.html
+#
+#export FEATURE_SET="TechPreviewNoUpgrade"
+
+# FEATURE_GATES -
+# Enable specific feature gates for the cluster. This should be provided as a
+# comma-separated list of feature gate names as key=value pairs, where value is a boolean of true or false.
+# Default: Undefined
+#
+# Example:
+#export FEATURE_GATES="ExampleFeatureGateA=true,ExampleFeatureGateB=false"
+
 # MASTER_HOSTNAME_FORMAT -
 # Set a custom hostname format for masters. This is a format string that should
 # include one %d field, which will be replaced with the number of the node.
@@ -522,14 +545,36 @@ set -x
 
 # MASTER_MEMORY, MASTER_DISK, MASTER_VCPU -
 # Change VM resources for masters
+# The provided defaults are really bare minimum: if possible, you should
+# always increase them.
 ## Defaults:
-## MASTER_DISK=30
+## MASTER_DISK=60
 ## MASTER_MEMORY=16384
 ## MASTER_VCPU=8
 #
 #export MASTER_MEMORY=16384
-#export MASTER_DISK=40
+#export MASTER_DISK=60
 #export MASTER_VCPU=8
+
+# ARBITER_HOSTNAME_FORMAT -
+# Set a custom hostname format for arbiters. This is a format string that should
+# include one %d field, which will be replaced with the number of the node.
+# Default: "arbiter-%d"
+#
+#export ARBITER_HOSTNAME_FORMAT=arbiter-%d
+
+# NUM_ARBITERS -
+# Indicate number of arbiter nodes to deploy.
+# Arbiter nodes take the place of a master node but run only critical containers to maintain HA for the cluster,
+# it is a TechPreview for OCP 4.19, so `export FEATURE_SET="TechPreviewNoUpgrade"` must be set.
+# Default: 0
+#
+# Furthermore, since an Arbiter node takes the place of a master node the NUM_MASTERS count
+# must be set to `export NUM_MASTERS=2` and not the default `3` to avoid even number etcd members.
+#
+# This script will currently only support 1 arbiter node and 2 masters.
+#
+#export NUM_ARBITERS=0
 
 # ARBITER_MEMORY, ARBITER_DISK, ARBITER_VCPU -
 # Change VM resources for arbiters
@@ -557,13 +602,15 @@ set -x
 
 # WORKER_MEMORY, WORKER_DISK, WORKER_VCPU -
 # Change VM resources for workers.
+# The provided defaults are really bare minimum: if possible, you should
+# always increase them.
 ## Defaults:
-## WORKER_DISK=30
+## WORKER_DISK=60
 ## WORKER_MEMORY=8192
 ## WORKER_VCPU=4
 #
 #export WORKER_MEMORY=8192
-#export WORKER_DISK=30
+#export WORKER_DISK=60
 #export WORKER_VCPU=4
 
 # NUM_EXTRA_WORKERS - Indicate number of extra VMs to create but not deploy.
@@ -575,12 +622,12 @@ set -x
 # Change VM resources for extra workers. If not supplied defaults to the
 # regular workers specs.
 ## Defaults:
-## EXTRA_WORKER_DISK=30
+## EXTRA_WORKER_DISK=60
 ## EXTRA_WORKER_MEMORY=8192
 ## EXTRA_WORKER_VCPU=4
 #
 #export EXTRA_WORKER_MEMORY=8192
-#export EXTRA_WORKER_DISK=30
+#export EXTRA_WORKER_DISK=60
 #export EXTRA_WORKER_VCPU=4
 
 # EXTRA_WORKERS_ONLINE_STATUS -
@@ -794,6 +841,14 @@ set -x
 # - COMPACT_IPV6
 # - COMPACT_IPV4_DHCP
 # - COMPACT_IPV6_DHCP
+# - TNA_IPV4
+# - TNA_IPV6
+# - TNA_IPV4_DHCP
+# - TNA_IPV6_DHCP
+# - TNF_IPV4
+# - TNF_IPV6
+# - TNF_IPV4_DHCP
+# - TNA_IPV6_DHCP
 # - HA_IPV4
 # - HA_IPV6
 # - HA_IPV4_DHCP
@@ -802,6 +857,10 @@ set -x
 # - SNO_IPV6
 # - SNO_IPV4_DHCP
 # - SNO_IPV6_DHCP
+# - SNOMIN_IPV4
+# - SNOMIN_IPV6
+# - SNOMIN_IPV4_DHCP
+# - SNOMIN_IPV6_DHCP
 # When set, the code internally sets other low level details such as disk size, memory, number of masters and workers,
 # cpu and ip stack.
 # This config variable is used only by the agent based installer and is required.

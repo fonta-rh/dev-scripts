@@ -19,14 +19,18 @@ if [ -z "${METAL3_DEV_ENV}" ]; then
   # TODO -- come up with a plan for continuously updating this
   # Note we only do this in the case where METAL3_DEV_ENV is
   # unset, to enable developer testing of local checkouts
-  git reset fab747ef4805bea2f12f70a7a5fbcedfc12a0222 --hard
+  git reset f5c0b859717e71c35701905161caa6e65221b3fb --hard
+
+  # Ansible 9+ requires Python 3.10+, but CentOS Stream 9 ships Python 3.9.
+  # Patch metal3-dev-env to use Ansible 8.x on centos9/rhel9.
+  sed -i '/ANSIBLE_VERSION/{ s/10\.7\.0/8.7.0/; }' lib/common.sh
 
   popd
 fi
 
 # This must be aligned with the metal3-dev-env pinned version above, see
 # https://github.com/metal3-io/metal3-dev-env/blob/master/lib/common.sh
-export ANSIBLE_VERSION=${ANSIBLE_VERSION:-"8.0.0"}
+export ANSIBLE_VERSION=${ANSIBLE_VERSION:-"8.7.0"}
 
 # Speed up dnf downloads
 sudo sh -c "echo 'fastestmirror=1' >> /etc/dnf/dnf.conf"
@@ -40,7 +44,30 @@ sudo dnf -y clean all
 old_version=$(sudo dnf info NetworkManager | grep Version | cut -d ':' -f 2)
 
 # Update to latest packages first
-sudo dnf -y upgrade --nobest
+# Number of attempts
+MAX_RETRIES=5
+# Delay between attempts (in seconds)
+_YUM_RETRY_BACKOFF=15
+
+attempt=1
+while (( attempt <= MAX_RETRIES )); do
+    if sudo dnf -y upgrade --nobest; then
+        echo "System upgraded successfully."
+        break
+    else
+        echo "Upgrade failed (attempt $attempt). Cleaning cache and retrying..."
+        sudo dnf clean all
+        sudo rm -rf /var/cache/dnf/*
+        sleep $(( _YUM_RETRY_BACKOFF * attempt ))
+    fi
+
+    (( attempt++ ))
+done
+
+if (( attempt > MAX_RETRIES )); then
+    echo "ERROR: Failed to upgrade system after $MAX_RETRIES attempts."
+    exit 1
+fi
 
 new_version=$(sudo dnf info NetworkManager | grep Version | cut -d ':' -f 2)
 # If NetworkManager was upgraded it needs to be restarted
@@ -63,31 +90,6 @@ fi
 # Install ansible, other packages are installed via
 # vm-setup/install-package-playbook.yml
 case $DISTRO in
-  "centos8"|"rhel8"|"almalinux8"|"rocky8")
-    # install network-scripts package to be able to use legacy network commands
-    sudo dnf install -y network-scripts
-    if [[ $DISTRO == "centos8" ]] && [[ "$NAME" != *"Stream"* ]]; then
-        echo "CentOS is not supported, please switch to CentOS Stream / RHEL / Rocky / Alma"
-        exit 1
-    fi
-    if [[ $DISTRO == "centos8" || $DISTRO == "almalinux8" || $DISTRO == "rocky8" ]]; then
-      sudo dnf -y install epel-release dnf --enablerepo=extras
-    elif [[ $DISTRO == "rhel8" ]]; then
-      # Enable EPEL for python3-passlib and python3-bcrypt required by metal3-dev-env
-      sudo dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
-      if sudo subscription-manager repos --list-enabled 2>&1 | grep "ansible-2-for-rhel-8-$(uname -m)-rpms"; then
-        # The packaged 2.x ansible is too old for compatibility with metal3-dev-env
-        sudo dnf erase -y ansible
-        sudo subscription-manager repos --disable=ansible-2-for-rhel-8-$(uname -m)-rpms
-      fi
-    fi
-    # Note recent ansible needs python >= 3.8 so we install 3.9 here
-    sudo dnf -y install python39
-    sudo alternatives --set python /usr/bin/python3.9
-    sudo alternatives --set python3 /usr/bin/python3.9
-    sudo update-alternatives --install /usr/bin/pip3 pip3 /usr/bin/pip3.9 1
-    PYTHON_DEVEL="python39-devel"
-    ;;
   "centos9"|"rhel9"|"almalinux9"|"rocky9")
     sudo dnf -y install python3-pip
     if [[ $DISTRO == "centos9" || $DISTRO == "almalinux9" || $DISTRO == "rocky9" ]] ; then
@@ -107,7 +109,7 @@ case $DISTRO in
     PYTHON_DEVEL="python3-devel"
     ;;
   *)
-    echo -n "CentOS or RHEL version not supported"
+    echo -n "CentOS 9 or RHEL 9 required (el8 is no longer supported due to glibc requirements)"
     exit 1
     ;;
 esac
@@ -122,7 +124,8 @@ else
     echo "Using yq from $(which yq)"
 fi
 
-GO_VERSION=${GO_VERSION:-1.22.3}
+GO_VERSION=${GO_VERSION:-1.24.10}
+GO_CUSTOM_MIRROR=${GO_CUSTOM_MIRROR:-"https://go.dev/dl"}
 
 GOARCH=$(uname -m)
 if [[ $GOARCH == "aarch64" ]]; then
@@ -130,6 +133,29 @@ if [[ $GOARCH == "aarch64" ]]; then
     sudo dnf -y install $PYTHON_DEVEL libxml2-devel libxslt-devel
 elif [[ $GOARCH == "x86_64" ]]; then
     GOARCH="amd64"
+fi
+
+VERSION="go${GO_VERSION}"
+OS="linux"
+
+GO_CHECKSUM="$(
+  curl -s "https://go.dev/dl/?mode=json&include=all" | jq -r \
+    --arg version "$VERSION" \
+    --arg os "$OS" \
+    --arg arch "$GOARCH" \
+    '
+      .[]
+      | select(.version == $version)
+      | .files[]
+      | select(.os == $os and .arch == $arch)
+      | .sha256
+    '
+)"
+
+if [ -z "$GO_CHECKSUM" ]; then
+  echo "Error: Could not find checksum for $VERSION ($OS/$ARCH)" >&2
+else
+  echo "Checksum: $GO_CHECKSUM"
 fi
 
 # Also need the 3.9 version of netaddr for ansible.netcommon
@@ -147,8 +173,9 @@ ANSIBLE_FORCE_COLOR=true ansible-playbook \
   -e "working_dir=$WORKING_DIR" \
   -e "virthost=$HOSTNAME" \
   -e "go_version=$GO_VERSION" \
+  -e "go_custom_mirror=$GO_CUSTOM_MIRROR" \
+  -e "go_checksum=$GO_CHECKSUM" \
   -e "GOARCH=$GOARCH" \
-  $ALMA_PYTHON_OVERRIDE \
   -i vm-setup/inventory.ini \
   -b -vvv vm-setup/install-package-playbook.yml
 popd
@@ -165,13 +192,6 @@ fi
 
 if [[ "${NODES_PLATFORM}" == "baremetal" ]] ; then
     sudo dnf -y install ipmitool
-fi
-
-# needed if we are using locally built images
-# We stop any systemd service so we can run in a container, since
-# there's no RPM/systemd version available for RHEL8
-if sudo systemctl is-active docker-distribution.service; then
-  sudo systemctl disable --now docker-distribution.service
 fi
 
 retry_with_timeout 5 60 "curl -L $OPENSHIFT_CLIENT_TOOLS_URL | sudo tar -U -C /usr/local/bin -xzf -"

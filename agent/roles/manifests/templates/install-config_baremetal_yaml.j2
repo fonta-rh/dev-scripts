@@ -1,4 +1,9 @@
 {% import 'net_macros.yaml' as net %}
+{% set hostnames = agent_nodes_hostnames.split(',') %}
+{% set bmc_addresses = agent_nodes_bmc_addresses.split(',') %}
+{% set bmc_passwords = agent_nodes_bmc_passwords.split(',') %}
+{% set bmc_usernames = agent_nodes_bmc_usernames.split(',') %}
+{% set bmc_verify_cas = agent_nodes_bmc_verify_cas.split(',') %}
 apiVersion: v1
 baseDomain: {{ base_domain }}
 compute:
@@ -6,11 +11,38 @@ compute:
   name: worker
   replicas: {{ num_workers }} 
   architecture: {{ goCPUArchitecture }}
+{% if num_arbiters != "0" %}
+arbiter:
+  architecture: {{ goCPUArchitecture }}
+  hyperthreading: Enabled
+  name: arbiter
+  replicas: {{ num_arbiters }}
+{% endif %}
+{% if feature_set %}
+featureSet: {{ feature_set }}
+{% endif %}
+{% if feature_gates %}
+featureGates:
+{% for gate in feature_gates.split(',') %}
+- {{ gate }}
+{% endfor %}
+{% endif %}
 controlPlane:
   architecture: {{ goCPUArchitecture }}
   hyperthreading: Enabled
   name: master
   replicas: {{ num_masters }} 
+{% if enable_two_node_fencing %}
+  fencing:
+    credentials:
+{% for hostname in hostnames %}
+    - hostname: {{hostname}}
+      address: {{ bmc_addresses[loop.index0] }}
+      username: {{ bmc_usernames[loop.index0] }}
+      password: {{ bmc_passwords[loop.index0] }}
+      certificateVerification: {{ 'Disabled' if bmc_verify_cas[loop.index0] == "False" else 'Enabled' }}
+{% endfor %}
+{% endif %}
 fips: {{ fips_mode }}
 metadata:
   name: {{ cluster_name }} 
@@ -50,7 +82,6 @@ networking:
   networkType: {{ network_type }} 
 platform:
 {% set macs = agent_nodes_macs.split(',') %}
-{% set hostnames = agent_nodes_hostnames.split(',') %}
 {% set ips = agent_nodes_ips.split(',') %}
 {% set ipsv6 = agent_nodes_ipsv6.split(',') %}
   baremetal:
@@ -65,10 +96,6 @@ platform:
       - {{ ingress_vip }}
 {% endfor %}
 {% if agent_install_config_bm_hosts == "true" %}
-{% set bmc_addresses = agent_nodes_bmc_addresses.split(',') %}
-{% set bmc_passwords = agent_nodes_bmc_passwords.split(',') %}
-{% set bmc_usernames = agent_nodes_bmc_usernames.split(',') %}
-{% set bmc_verify_cas = agent_nodes_bmc_verify_cas.split(',') %}
     provisioningHostIP: {{ cluster_provisioning_ip }}
     provisioningNetworkInterface: {{ cluster_provisioning_interface }}
     provisioningNetworkCIDR: {{ provisioning_network }}
@@ -81,7 +108,11 @@ platform:
         address: {{ bmc_addresses[loop.index0] }}
         username: {{ bmc_usernames[loop.index0] }}
         password: {{ bmc_passwords[loop.index0] }}
-        disableCertificateVerification: {% if bmc_verify_cas[loop.index0] == "False" %}true{% else %}false{% endif %}
+{% if bmc_verify_cas[loop.index0] == "False" %}
+        disableCertificateVerification: true
+{% else %}
+        disableCertificateVerification: false
+{% endif %}
       networkConfig:
         interfaces:
       {{ net.interfaces("eth0", macs[loop.index0])|indent(4, True) }}

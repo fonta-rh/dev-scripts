@@ -23,10 +23,17 @@ function agent_remove_iscsi_disks() {
       done
 }
 
-if [[ "${AGENT_E2E_TEST_BOOT_MODE}" == "DISKIMAGE" ]]; then
+if [[ -d "${OCP_DIR}/cache" && -d "${OCP_DIR}/temp" ]]; then
     sudo rm -rf "${OCP_DIR}/cache"
     sudo rm -rf "${OCP_DIR}/temp"
     sudo podman rmi -f ${APPLIANCE_IMAGE} || true
+fi
+
+if [[ -d "${OCP_DIR}/iso_builder" ]]; then
+    sudo rm -rf "${OCP_DIR}/iso_builder"
+
+    AGENT_ISO_BUILDER_IMAGE=$(getAgentISOBuilderImage)
+    sudo podman rmi -f ${AGENT_ISO_BUILDER_IMAGE} || true
 fi
 
 if [[ -d ${BOOT_SERVER_DIR} ]]; then
@@ -65,4 +72,8 @@ if [[ "${AGENT_E2E_TEST_BOOT_MODE}" == "ISCSI" ]]; then
 
     agent_remove_iscsi_disks master $NUM_MASTERS
     agent_remove_iscsi_disks worker $NUM_WORKERS
+fi
+
+if [[ -d "$(sudo buildah info --format '{{.store.GraphRoot}}')/vfs" ]] ; then
+    sudo buildah rmi -f --storage-driver vfs localhost/appliance-test >/dev/null 2>&1 || true
 fi

@@ -153,9 +153,17 @@ function create_cluster() {
             cp $ASSET $ASSET_NEW
             for IMAGE in $(yq '.. | objects | select(has("containers")) | .containers[].image' $ASSET -r | sort | uniq) ; do
                 IMAGE_SHORT=${IMAGE##*/}
+                [[ $IMAGE_SHORT =~ "@" ]] && DIGEST=${IMAGE_SHORT##*@}
+                # Remove digest from the short name for podman push
+                IMAGE_SHORT=${IMAGE_SHORT%@*}
                 IMAGE_MIRRORED=${LOCAL_REGISTRY_DNS_NAME}:${LOCAL_REGISTRY_PORT}/localimages/assets/${IMAGE_SHORT}
                 sudo -E podman pull --authfile $PULL_SECRET_FILE $IMAGE
                 sudo podman push --tls-verify=false --remove-signatures --authfile $PULL_SECRET_FILE $IMAGE $IMAGE_MIRRORED
+                if [[ -n ${DIGEST:-} ]]; then
+                  # Get digest of the pushed image
+                  DIGEST=$(podman inspect --format "{{.Digest}}" $IMAGE_MIRRORED)
+                  IMAGE_MIRRORED="${IMAGE_MIRRORED}@${DIGEST}"
+                fi
                 sed -i -e "s%${IMAGE}%${IMAGE_MIRRORED}%g" $ASSET_NEW
             done
         done
@@ -224,22 +232,10 @@ function node_map_to_install_config_hosts() {
     start_idx="$2"
     role="$3"
 
-    # If arbiter is enabled, an arbiter node will be created so we increase the number of hosts by 1
-    # when the role is for master to capture the arbiter position.
-    # If the role is for a worker, we increment the index since the worker position has moved by 1.
-    if [[ ! -z "${ENABLE_ARBITER:-}" && "$role" == "master" ]]; then
-      num_hosts=$((num_hosts + 1))
-    elif [[ ! -z "${ENABLE_ARBITER:-}" && "$role" == "worker" ]]; then
-      start_idx=$((start_idx + 1))
-    fi
-
-    for ((idx=$start_idx;idx<$(($num_hosts + $start_idx));idx++)); do
+    for ((idx=$start_idx;idx<$(($1 + $start_idx));idx++)); do
       name=$(node_val ${idx} "name")
       mac=$(node_val ${idx} "ports[0].address")
       local node_role=$role
-      if [[ ! -z "${ENABLE_ARBITER:-}" && $idx -eq $(($num_hosts + $start_idx - 1)) && "$role" == "master" ]]; then
-        node_role=arbiter
-      fi
 
       driver=$(node_val ${idx} "driver")
       if [ $driver == "ipmi" ] ; then
@@ -262,7 +258,7 @@ function node_map_to_install_config_hosts() {
 
       cat << EOF
       - name: ${name}
-        role: ${node_role}
+        role: ${role}
         bootMACAddress: ${mac}
         bootMode: ${boot_mode}
         bmc:
@@ -272,13 +268,15 @@ function node_map_to_install_config_hosts() {
 EOF
 
       if [[ "$driver_prefix" == "redfish" ]]; then
-          # Set disableCertificateVerification
-          # Heads up, "verify ca" in ironic driver config, and "disableCertificateVerification" in BMH have opposite meaning
-          verify_ca=$(node_val ${idx} "driver_info.redfish_verify_ca")
-          disable_certificate_verification=$([ "$verify_ca" = "False" ] && echo "true" || echo "false")
-          cat << EOF
+          # Set disableCertificateVerification on older versions
+          if is_lower_version "$(openshift_version $OCP_DIR)" "4.22"; then
+              # Heads up, "verify ca" in ironic driver config, and "disableCertificateVerification" in BMH have opposite meaning
+              verify_ca=$(node_val ${idx} "driver_info.redfish_verify_ca")
+              disable_certificate_verification=$([ "$verify_ca" = "False" ] && echo "true" || echo "false")
+              cat << EOF
           disableCertificateVerification: ${disable_certificate_verification}
 EOF
+          fi
       fi
 
 
@@ -324,19 +322,24 @@ function node_map_to_install_config_fencing_credentials() {
     return 0
   fi
 
-  if  [[ -z "${ENABLE_ARBITER:-}" ]] && [[ "${NUM_MASTERS}" -eq 2 ]]; then
+  if  [ "${ENABLE_TWO_NODE_FENCING:-}" == "true" ]; then
 	cat <<EOF
   fencing:
     credentials:
 EOF
     for ((idx=0;idx<$(($NUM_MASTERS));idx++)); do
-      name="$(printf $MASTER_HOSTNAME_FORMAT ${idx})"
+      hostname="$(printf $MASTER_HOSTNAME_FORMAT ${idx})"
+      # IP V6 and DualStack will force FQDN hostname for the VMs, we need to update
+      # this here to correctly set the hostname for the fencing credentials.
+      if [[ $IP_STACK != 'v4' ]]; then
+        hostname="${hostname}.${CLUSTER_DOMAIN}"
+      fi
       username=$(node_val ${idx} "driver_info.username")
       password=$(node_val ${idx} "driver_info.password")
       address=$(node_val ${idx} "driver_info.address")
 
       cat <<EOF
-    - hostname: ${name}
+    - hostname: ${hostname}
       address: ${address}
       username: ${username}
       password: ${password}
@@ -628,6 +631,25 @@ EOF
 
     if [[ "$reg_state" != "running" || $restart_registry -eq 1 ]]; then
         sudo podman rm registry -f || true
+
+        MAX_RETRIES=5
+        _PULL_RETRY_DELAY=10
+
+        # Try pulling the image first to tolerate quay.io errors like 504s.
+        for attempt in $(seq 1 $MAX_RETRIES); do
+            if sudo podman pull "${DOCKER_REGISTRY_IMAGE}"; then
+                echo "Successfully pulled ${DOCKER_REGISTRY_IMAGE}"
+                break
+            fi
+
+            if [[ $attempt -lt $MAX_RETRIES ]]; then
+                echo "Pull failed, retrying in ${_PULL_RETRY_DELAY}s..."
+                sleep "${_PULL_RETRY_DELAY}"
+            else
+                echo "Failed to pull ${DOCKER_REGISTRY_IMAGE} after $MAX_RETRIES attempts"
+                exit 1
+            fi
+        done
 
         sudo podman run -d --name registry --net=host --privileged \
             -v ${REGISTRY_DIR}/data:/var/lib/registry:z \

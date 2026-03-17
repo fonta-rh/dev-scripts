@@ -126,7 +126,7 @@ export OPENSHIFT_CLIENT_TOOLS_URL=https://mirror.openshift.com/pub/openshift-v4/
 # Note: when changing defaults for OPENSHIFT_RELEASE_STREAM, make sure to update
 #       doc in config_example.sh
 export OPENSHIFT_RELEASE_TYPE=${OPENSHIFT_RELEASE_TYPE:-nightly}
-export OPENSHIFT_RELEASE_STREAM=${OPENSHIFT_RELEASE_STREAM:-4.20}
+export OPENSHIFT_RELEASE_STREAM=${OPENSHIFT_RELEASE_STREAM:-4.22}
 if [[ "$OPENSHIFT_RELEASE_TYPE" == "ga" ]]; then
     if [[ -z "$OPENSHIFT_VERSION" ]]; then
       error "OPENSHIFT_VERSION is required with OPENSHIFT_RELEASE_TYPE=ga"
@@ -170,7 +170,6 @@ if [ -z "${OPENSHIFT_RELEASE_IMAGE:-}" ]; then
 fi
 export OPENSHIFT_RELEASE_IMAGE="${OPENSHIFT_RELEASE_IMAGE:-$LATEST_CI_IMAGE}"
 export OPENSHIFT_INSTALL_PATH="${OPENSHIFT_INSTALL_PATH:-$GOPATH/src/github.com/openshift/installer}"
-export OPENSHIFT_AGENT_INSTALER_UTILS_PATH="${OPENSHIFT_AGENT_INSTALER_UTILS_PATH:-$GOPATH/src/github.com/openshift/agent-installer-utils}"
 
 # Override the image to use for installing hive
 export HIVE_DEPLOY_IMAGE="${HIVE_DEPLOY_IMAGE:-registry.ci.openshift.org/openshift/hive-v4.0:hive}"
@@ -256,9 +255,11 @@ FILESYSTEM=${FILESYSTEM:="/"}
 
 export NODES_FILE=${NODES_FILE:-"${WORKING_DIR}/${CLUSTER_NAME}/ironic_nodes.json"}
 export EXTRA_NODES_FILE=${EXTRA_NODES_FILE:-"${WORKING_DIR}/${CLUSTER_NAME}/extra_ironic_nodes.json"}
+export ARM_NODES_FILE=${ARM_NODES_FILE:-"${WORKING_DIR}/${CLUSTER_NAME}/arm_ironic_nodes.json"}
 NODES_PLATFORM=${NODES_PLATFORM:-"libvirt"}
 BAREMETALHOSTS_FILE=${BAREMETALHOSTS_FILE:-"${OCP_DIR}/baremetalhosts.json"}
 EXTRA_BAREMETALHOSTS_FILE=${EXTRA_BAREMETALHOSTS_FILE:-"${OCP_DIR}/extra_baremetalhosts.json"}
+EXTRA_ARM_BAREMETALHOSTS_FILE=${EXTRA_ARM_BAREMETALHOSTS_FILE:-"${OCP_DIR}/extra_arm_baremetalhosts.json"}
 export BMO_WATCH_ALL_NAMESPACES=${BMO_WATCH_ALL_NAMESPACES:-"false"}
 
 # Optionally set this to a path to use a local dev copy of
@@ -274,32 +275,18 @@ export CONTAINER_RUNTIME="podman"
 
 export NUM_MASTERS=${NUM_MASTERS:-"3"}
 export NUM_WORKERS=${NUM_WORKERS:-"2"}
-export ENABLE_ARBITER=${ENABLE_ARBITER:-}
+export NUM_ARBITERS=${NUM_ARBITERS:-"0"}
 export NUM_EXTRA_WORKERS=${NUM_EXTRA_WORKERS:-"0"}
+export NUM_ARM_WORKERS=${NUM_ARM_WORKERS:-"0"}
 export EXTRA_WORKERS_ONLINE_STATUS=${EXTRA_WORKERS_ONLINE_STATUS:-"true"}
 export EXTRA_WORKERS_NAMESPACE=${EXTRA_WORKERS_NAMESPACE:-"openshift-machine-api"}
 export VM_EXTRADISKS=${VM_EXTRADISKS:-"false"}
 export VM_EXTRADISKS_LIST=${VM_EXTRADISKS_LIST:-"vdb"}
 export VM_EXTRADISKS_SIZE=${VM_EXTRADISKS_SIZE:-"8G"}
 export MASTER_HOSTNAME_FORMAT=${MASTER_HOSTNAME_FORMAT:-"master-%d"}
+export ARBITER_HOSTNAME_FORMAT=${ARBITER_HOSTNAME_FORMAT:-"arbiter-%d"}
 export WORKER_HOSTNAME_FORMAT=${WORKER_HOSTNAME_FORMAT:-"worker-%d"}
 export EXTRA_WORKER_HOSTNAME_FORMAT=${EXTRA_WORKER_HOSTNAME_FORMAT:-"extraworker-%d"}
-
-export MASTER_MEMORY=${MASTER_MEMORY:-16384}
-export MASTER_DISK=${MASTER_DISK:-60}
-export MASTER_VCPU=${MASTER_VCPU:-8}
-
-export ARBITER_MEMORY=${ARBITER_MEMORY:-8192}
-export ARBITER_DISK=${ARBITER_DISK:-50}
-export ARBITER_VCPU=${ARBITER_VCPU:-4}
-
-export WORKER_MEMORY=${WORKER_MEMORY:-8192}
-export WORKER_DISK=${WORKER_DISK:-60}
-export WORKER_VCPU=${WORKER_VCPU:-4}
-
-export EXTRA_WORKER_MEMORY=${EXTRA_WORKER_MEMORY:-${WORKER_MEMORY}}
-export EXTRA_WORKER_DISK=${EXTRA_WORKER_DISK:-${WORKER_DISK}}
-export EXTRA_WORKER_VCPU=${EXTRA_WORKER_VCPU:-${WORKER_VCPU}}
 
 # Ironic vars (Image can be use <NAME>_LOCAL_IMAGE to override)
 export IRONIC_IMAGE=${IRONIC_IMAGE:-"quay.io/metal3-io/ironic:main"}
@@ -310,7 +297,7 @@ export IRONIC_IMAGES_DIR="${IRONIC_DATA_DIR}/html/images"
 export VBMC_IMAGE=${VBMC_IMAGE:-"quay.io/metal3-io/vbmc"}
 export SUSHY_TOOLS_IMAGE=${SUSHY_TOOLS_IMAGE:-"quay.io/metal3-io/sushy-tools"}
 export VBMC_BASE_PORT=${VBMC_BASE_PORT:-"6230"}
-export VBMC_MAX_PORT=$((VBMC_BASE_PORT + NUM_MASTERS + NUM_WORKERS + NUM_EXTRA_WORKERS - 1))
+export VBMC_MAX_PORT=$((VBMC_BASE_PORT + NUM_MASTERS + NUM_ARBITERS + NUM_WORKERS + NUM_EXTRA_WORKERS - 1))
 export REDFISH_EMULATOR_IGNORE_BOOT_DEVICE="${REDFISH_EMULATOR_IGNORE_BOOT_DEVICE:-False}"
 
 # Which docker registry image should we use?
@@ -358,6 +345,16 @@ if [ ! -d "$IRONIC_IMAGES_DIR" ]; then
   sudo mkdir -p "$IRONIC_IMAGES_DIR"
 fi
 
+if [[ ${NUM_ARBITERS} -gt 1 ]]; then
+  error "Creating a cluster with more than 1 arbiter is currently not supported"
+  exit 1
+fi
+
+if [[ ${NUM_ARBITERS} -eq 1 ]] && [[ ${NUM_MASTERS} -ne 2 ]]; then
+  error "Creating a cluster with 1 arbiter and ${NUM_MASTERS} masters is not supported, please use 2 masters"
+  exit 1
+fi
+
 # Previously the directory was owned by root, we need to alter
 # permissions to be owned by the user running dev-scripts.
 if [ ! -f "$IRONIC_IMAGES_DIR/.permissions" ]; then
@@ -375,16 +372,33 @@ export TEST_CUSTOM_MAO=${TEST_CUSTOM_MAO:-false}
 # (Currently this just expects a non-empty value, the IP is fixed to .9)
 export ENABLE_BOOTSTRAP_STATIC_IP=${ENABLE_BOOTSTRAP_STATIC_IP:-}
 
-# TODO(bnemec): Once https://github.com/ansible/ansible/pull/75537 merges this
-# can be removed.
-ALMA_PYTHON_OVERRIDE=
-source /etc/os-release
-export DISTRO="${ID}${VERSION_ID%.*}"
-if [[ $DISTRO == "almalinux8" || $DISTRO == "rocky8" ]]; then
-    ALMA_PYTHON_OVERRIDE="-e ansible_python_interpreter=/usr/libexec/platform-python"
+export EXTERNAL_LOADBALANCER=${EXTERNAL_LOADBALANCER:-}
+
+if [ -n "$EXTERNAL_LOADBALANCER" -a -z "$ENABLE_BOOTSTRAP_STATIC_IP" ]; then
+  error "EXTERNAL_LOADBALANCER requires ENABLE_BOOTSTRAP_STATIC_IP to be set as well"
+  exit 1
 fi
 
+source /etc/os-release
+export DISTRO="${ID}${VERSION_ID%.*}"
+
 export ENABLE_LOCAL_REGISTRY=${ENABLE_LOCAL_REGISTRY:-}
+
+# Helper variable for TNF, normally not meant to be configurable by user.
+# When two node fencing is detected we set this variable because the installer
+# validation will fail if fencing credentials are not present when two masters
+# and no arbiter are set.
+# Skip on agent scenarios to avoid accidental overrides.
+export ENABLE_TWO_NODE_FENCING=${ENABLE_TWO_NODE_FENCING:-false}
+if [[ -z ${AGENT_E2E_TEST_SCENARIO:-} ]] && [[ ${NUM_ARBITERS} -eq 0 ]] && [[ ${NUM_MASTERS} -eq 2 ]]; then
+  export ENABLE_TWO_NODE_FENCING="true"
+fi
+
+# Only redfish BMC driver is supported for two node fencing
+if [[ "${BMC_DRIVER}" != "redfish" ]] && [[ "${ENABLE_TWO_NODE_FENCING:-}" == "true" ]]; then
+  printf "Only redfish BMC driver is supported for Two Node Fencing deployments: BMC_DRIVER=${BMC_DRIVER}, ENABLE_TWO_NODE_FENCING=${ENABLE_TWO_NODE_FENCING}"
+  exit 1
+fi
 
 # Defaults the DISABLE_MULTICAST variable
 export DISABLE_MULTICAST=${DISABLE_MULTICAST:-false}
@@ -395,7 +409,7 @@ export AGENT_WAIT_FOR_INSTALL_COMPLETE=${AGENT_WAIT_FOR_INSTALL_COMPLETE:-true}
 # Agent specific configuration 
 
 function invalidAgentValue() {
-  printf "Found invalid value \"$AGENT_E2E_TEST_SCENARIO\" for AGENT_E2E_TEST_SCENARIO. Supported values: 'COMPACT_IPXX', 'HA_IPXX', 'SNO_IPXX', '4CONTROL_IPXX', or '5CONTROL_IPXX', where XX is 'V4', 'V6', or 'V4V6'"
+  printf "Found invalid value \"$AGENT_E2E_TEST_SCENARIO\" for AGENT_E2E_TEST_SCENARIO. Supported values: 'COMPACT_IPXX', 'HA_IPXX', 'SNO_IPXX', 'TNA_IPXX', '4CONTROL_IPXX', or '5CONTROL_IPXX', where XX is 'V4', 'V6', or 'V4V6'"
   exit 1
 }
 
@@ -405,7 +419,7 @@ export NETWORKING_MODE=${NETWORKING_MODE:-}
 export AGENT_E2E_TEST_BOOT_MODE=${AGENT_E2E_TEST_BOOT_MODE:-"ISO"}
 export AGENT_CLEANUP_ISO_BUILDER_CACHE_LOCAL_DEV=${AGENT_CLEANUP_ISO_BUILDER_CACHE_LOCAL_DEV:-"false"}
 export AGENT_RENDEZVOUS_NODE_HOSTNAME=${AGENT_RENDEZVOUS_NODE_HOSTNAME:-${CLUSTER_NAME}_master_0}
-export AGENT_OVE_ISO_SIZE=${AGENT_OVE_ISO_SIZE:-40}
+export AGENT_OVE_ISO_SIZE=${AGENT_OVE_ISO_SIZE:-70}
 
 # HTTP boot server port used by the agent installer for PXE and minimal ISO
 # Needed to be defined here since it's required also by the shared step 02_configure_host.sh
@@ -438,45 +452,77 @@ if [[ ! -z ${AGENT_E2E_TEST_SCENARIO} ]]; then
   case "$SCENARIO" in
       "5CONTROL" )
           export NUM_MASTERS=5
-          export MASTER_VCPU=4
-          export MASTER_DISK=100
-          export MASTER_MEMORY=24576
+          export MASTER_VCPU=${MASTER_VCPU:-4}
+          export MASTER_DISK=${MASTER_DISK:-100}
+          export MASTER_MEMORY=${MASTER_MEMORY:-24576}
           export NUM_WORKERS=0
           ;;
       "4CONTROL" )
           export NUM_MASTERS=4
-          export MASTER_VCPU=4
-          export MASTER_DISK=100
-          export MASTER_MEMORY=24576
+          export MASTER_VCPU=${MASTER_VCPU:-4}
+          export MASTER_DISK=${MASTER_DISK:-100}
+          export MASTER_MEMORY=${MASTER_MEMORY:-24576}
           export NUM_WORKERS=0
           ;;
       "COMPACT" )
           export NUM_MASTERS=3
-          export MASTER_VCPU=4
-          export MASTER_DISK=100
-          export MASTER_MEMORY=32768
+          export MASTER_VCPU=${MASTER_VCPU:-4}
+          export MASTER_DISK=${MASTER_DISK:-100}
+          export MASTER_MEMORY=${MASTER_MEMORY:-32768}
           export NUM_WORKERS=0
+          ;;
+      "TNA" )
+          export NUM_MASTERS=2
+          export MASTER_VCPU=${MASTER_VCPU:-8}
+          export MASTER_DISK=${MASTER_DISK:-100}
+          export MASTER_MEMORY=${MASTER_MEMORY:-32768}
+          export NUM_ARBITERS=1
+          export ARBITER_VCPU=${ARBITER_VCPU:-2}
+          export ARBITER_MEMORY=${ARBITER_MEMORY:-8192}
+          export ARBITER_DISK=${ARBITER_DISK:-50}
+          export NUM_WORKERS=0
+          ;;
+      "TNF" )
+          export NUM_MASTERS=2
+          export MASTER_VCPU=${MASTER_VCPU:-8}
+          export MASTER_DISK=${MASTER_DISK:-100}
+          export MASTER_MEMORY=${MASTER_MEMORY:-32768}
+          export NUM_WORKERS=0
+          export ENABLE_TWO_NODE_FENCING="true"
           ;;
       "HA" )
           export NUM_MASTERS=3
-          export MASTER_VCPU=4
-          export MASTER_DISK=100
-          export MASTER_MEMORY=32768
+          export MASTER_VCPU=${MASTER_VCPU:-4}
+          export MASTER_DISK=${MASTER_DISK:-100}
+          export MASTER_MEMORY=${MASTER_MEMORY:-32768}
           export NUM_WORKERS=2
-          export WORKER_VCPU=4
-          export WORKER_DISK=100
-          export WORKER_MEMORY=9000
+          export WORKER_VCPU=${WORKER_VCPU:-4}
+          export WORKER_DISK=${WORKER_DISK:-100}
+          export WORKER_MEMORY=${WORKER_MEMORY:-9000}
           ;;
       "SNO" )
           export NUM_MASTERS=1
-          export MASTER_VCPU=8
-          export MASTER_DISK=100
-          export MASTER_MEMORY=32768
+          export MASTER_VCPU=${MASTER_VCPU:-8}
+          export MASTER_DISK=${MASTER_DISK:-100}
+          export MASTER_MEMORY=${MASTER_MEMORY:-32768}
           export NUM_WORKERS=0
           export NETWORK_TYPE="OVNKubernetes"
           export AGENT_PLATFORM_TYPE="${AGENT_PLATFORM_TYPE:-"none"}"
           if [[ "${AGENT_PLATFORM_TYPE}" != "external" ]]  && [[ "${AGENT_PLATFORM_TYPE}" != "none" ]]; then
             echo "Invalid value ${AGENT_PLATFORM_TYPE},  use 'none' or 'external'."
+            exit 1
+          fi
+          ;;
+      "SNOMIN" )
+          export NUM_MASTERS=1
+          export MASTER_VCPU=${MASTER_VCPU:-4}
+          export MASTER_DISK=${MASTER_DISK:-100}
+          export MASTER_MEMORY=${MASTER_MEMORY:-32768}
+          export NUM_WORKERS=0
+          export NETWORK_TYPE="OVNKubernetes"
+          export AGENT_PLATFORM_TYPE="${AGENT_PLATFORM_TYPE:-"none"}"
+          if [[ "${AGENT_PLATFORM_TYPE}" != "external" ]]  && [[ "${AGENT_PLATFORM_TYPE}" != "none" ]]; then
+            echo "Invalid value ${AGENT_PLATFORM_TYPE}, use 'none' or 'external'."
             exit 1
           fi
           ;;
@@ -487,17 +533,34 @@ if [[ ! -z ${AGENT_E2E_TEST_SCENARIO} ]]; then
   # Increase master vCPU for agent OVE ISO installs or when certain operators like 'mtv' are used,
   # as some operators require more CPUs.
   if [ "${AGENT_E2E_TEST_BOOT_MODE}" == "ISO_NO_REGISTRY" ]; then
-    export MASTER_VCPU=9
+    if ((MASTER_VCPU < 9)); then
+      export MASTER_VCPU=9
+    fi
     if [ "${SCENARIO}" == "SNO" ]; then
-       export MASTER_VCPU=16
+       if ((MASTER_VCPU < 16)); then
+        export MASTER_VCPU=16
+      fi
     fi
     if [ "${SCENARIO}" == "HA" ]; then
-       export WORKER_VCPU=5
+       if ((WORKER_VCPU < 5)); then
+        export WORKER_VCPU=5
+      fi
     fi
+    # Increase disk storage requirements for NoRegistryClusterInstall aka agent OVE ISO
+    # Large storage size is used to catch any regression related to https://issues.redhat.com/browse/OCPBUGS-76382.
+    case "$SCENARIO" in
+      "SNO"|"COMPACT"|"HA" )
+          if ((MASTER_DISK < 300)); then
+            export MASTER_DISK=300
+          fi
+        ;;
+    esac
   fi
 
-  if [ "$AGENT_OPERATORS" =~ "mtv" ]; then
-    export MASTER_VCPU=9
+  if [[ "$AGENT_OPERATORS" =~ "mtv" ]]; then
+    if ((MASTER_VCPU < 9)); then
+      export MASTER_VCPU=9
+    fi
   fi
 
   if [ ! -z "${AGENT_DEPLOY_MCE}" ]; then
@@ -506,8 +569,12 @@ if [[ ! -z ${AGENT_E2E_TEST_SCENARIO} ]]; then
     export VM_EXTRADISKS_LIST="vda vdb"
     export VM_EXTRADISKS_SIZE="10G"
 
-    export MASTER_VCPU=8
-    export MASTER_MEMORY=32768
+    if ((MASTER_VCPU < 8)); then
+      export MASTER_VCPU=8
+    fi
+    if ((MASTER_MEMORY < 32768)); then
+      export MASTER_MEMORY=32768
+    fi
   fi
 
   if [[ $IP_STACK != 'v4' ]] && [[ $IP_STACK != 'v6' ]] && [[ $IP_STACK != 'v4v6' ]]; then
@@ -572,6 +639,25 @@ fi
 
 export AGENT_TEST_CASES=${AGENT_TEST_CASES:-}
 
+export MASTER_MEMORY=${MASTER_MEMORY:-16384}
+export MASTER_DISK=${MASTER_DISK:-60}
+export MASTER_VCPU=${MASTER_VCPU:-8}
+
+export ARBITER_MEMORY=${ARBITER_MEMORY:-8192}
+export ARBITER_DISK=${ARBITER_DISK:-50}
+export ARBITER_VCPU=${ARBITER_VCPU:-4}
+
+export WORKER_MEMORY=${WORKER_MEMORY:-8192}
+export WORKER_DISK=${WORKER_DISK:-60}
+export WORKER_VCPU=${WORKER_VCPU:-4}
+
+export EXTRA_WORKER_MEMORY=${EXTRA_WORKER_MEMORY:-${WORKER_MEMORY}}
+export EXTRA_WORKER_DISK=${EXTRA_WORKER_DISK:-${WORKER_DISK}}
+export EXTRA_WORKER_VCPU=${EXTRA_WORKER_VCPU:-${WORKER_VCPU}}
+
+export ARM_WORKER_MEMORY=${ARM_WORKER_MEMORY:-${WORKER_MEMORY}}
+export ARM_WORKER_DISK=${ARM_WORKER_DISK:-${WORKER_DISK}}
+export ARM_WORKER_VCPU=${ARM_WORKER_VCPU:-${WORKER_VCPU}}
 
 export PERSISTENT_IMAGEREG=${PERSISTENT_IMAGEREG:-false}
 if [ "${OPENSHIFT_CI}" == true ] ; then

@@ -3,6 +3,7 @@ set -euxo pipefail
 shopt -s nocasematch
 
 SCRIPTDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
+ARCH=$(uname -m)
 
 LOGDIR=${SCRIPTDIR}/logs
 source $SCRIPTDIR/logging.sh
@@ -13,7 +14,6 @@ source $SCRIPTDIR/validation.sh
 source $SCRIPTDIR/release_info.sh
 source $SCRIPTDIR/agent/common.sh
 source $SCRIPTDIR/agent/iscsi_utils.sh
-source $SCRIPTDIR/agent/e2e/agent-tui/utils.sh
 
 early_deploy_validation
 
@@ -60,9 +60,9 @@ function create_factory_image() {
     "${openshift_install}" --dir="${asset_dir}" --log-level=debug agent create unconfigured-ignition
     base_iso_url=$(oc adm release info --registry-config "$PULL_SECRET_FILE" --image-for=machine-os-images --insecure=true $OPENSHIFT_RELEASE_IMAGE)
     mkdir -p $HOME/.cache/agent/image_cache
-    oc image extract --path /coreos/coreos-$(uname -m).iso:$HOME/.cache/agent/image_cache --registry-config "$PULL_SECRET_FILE" --confirm $base_iso_url
+    oc image extract --path /coreos/coreos-${ARCH}.iso:$HOME/.cache/agent/image_cache --registry-config "$PULL_SECRET_FILE" --confirm $base_iso_url
     local agent_iso_abs_path="$(realpath "${OCP_DIR}")"
-    podman run --pull=newer --privileged --rm -v /run/udev:/run/udev -v "${agent_iso_abs_path}:${agent_iso_abs_path}" -v "$HOME/.cache/agent/image_cache/:$HOME/.cache/agent/image_cache/" quay.io/coreos/coreos-installer:release iso ignition embed -f -i "${agent_iso_abs_path}/unconfigured-agent.ign" -o "${agent_iso_abs_path}/agent.iso" $HOME/.cache/agent/image_cache/coreos-$(uname -m).iso
+    podman run --pull=newer --privileged --rm -v /run/udev:/run/udev -v "${agent_iso_abs_path}:${agent_iso_abs_path}" -v "$HOME/.cache/agent/image_cache/:$HOME/.cache/agent/image_cache/" quay.io/coreos/coreos-installer:release iso ignition embed -f -i "${agent_iso_abs_path}/unconfigured-agent.ign" -o "${agent_iso_abs_path}/agent.iso" $HOME/.cache/agent/image_cache/coreos-${ARCH}.iso
 
     if [ "${AGENT_APPLIANCE_HOTPLUG}" != true ]; then
         create_config_image
@@ -82,16 +82,40 @@ function create_config_image() {
     cp -r ${config_image_dir}/auth ${asset_dir}
 }
 
+# Build OVE ISO using script method
+function build_ove_iso_script() {
+  local asset_dir=$1
+  local release_image_url=$2
+
+  echo "Start building Agent OVE ISO"
+  ./hack/build-ove-image.sh \
+    --pull-secret-file "${PULL_SECRET_FILE}" \
+    --release-image-url "${release_image_url}" \
+    --ssh-key-file "${SSH_KEY_FILE}" \
+    ${APPLIANCE_IMAGE:+--appliance-image "${APPLIANCE_IMAGE}"} \
+    --dir "${asset_dir}" >/dev/null
+  echo "Agent OVE ISO completed"
+
+  # Move the agent-ove iso in the default folder
+  agent_iso_no_registry=$(get_agent_iso_no_registry)
+  mv ${agent_iso_no_registry} "$SCRIPTDIR/$OCP_DIR"
+}
+
 function create_agent_iso_no_registry() {
-  # Clone agent-installer-utils
-  if [[ ! -d $OPENSHIFT_AGENT_INSTALER_UTILS_PATH ]]; then
-    sync_repo_and_patch go/src/github.com/openshift/agent-installer-utils https://github.com/openshift/agent-installer-utils.git
-  fi
-  # Create agent ISO without registry a.k.a. OVE ISO
   local asset_dir=${1}
+
+  # Update release_info.json as its needed by CI tests
+  save_release_info ${OPENSHIFT_RELEASE_IMAGE} ${OCP_DIR}
+
+  AGENT_ISO_BUILDER_IMAGE=$(getAgentISOBuilderImage)
+
+  id=$(podman create --pull always --authfile "${PULL_SECRET_FILE}" "${AGENT_ISO_BUILDER_IMAGE}") && \
+    podman cp "${id}":/src "${asset_dir}" && \
+    podman rm "${id}"
+
   pushd .
-  cd $OPENSHIFT_AGENT_INSTALER_UTILS_PATH/tools/iso_builder
-  ./hack/build-ove-image.sh --pull-secret-file "${PULL_SECRET_FILE}" --release-image-url "${OPENSHIFT_RELEASE_IMAGE}" --ssh-key-file "${SSH_KEY_FILE}" --dir "${asset_dir}"
+  cd "${asset_dir}"/src
+  build_ove_iso_script "${asset_dir}" "${OPENSHIFT_RELEASE_IMAGE}"
   popd
 }
 
@@ -148,7 +172,7 @@ function set_file_acl() {
 }
 
 function get_agent_iso() {
-    local agent_iso="${OCP_DIR}/agent.$(uname -p).iso"
+    local agent_iso="${OCP_DIR}/agent.${ARCH}.iso"
     if [ ! -f "${agent_iso}" -a -f "${OCP_DIR}/agent.iso" ]; then
         agent_iso="${OCP_DIR}/agent.iso"
     fi
@@ -157,7 +181,7 @@ function get_agent_iso() {
 
 function get_agent_iso_no_registry() {
     local base_dir=$SCRIPTDIR/$OCP_DIR
-    local iso_name="agent-ove.$(uname -p).iso"
+    local iso_name="agent-ove.${ARCH}.iso"
     local agent_iso_no_registry=$(find "$base_dir" -type f -name "$iso_name" 2>/dev/null | head -n 1)
     if [ -z "$agent_iso_no_registry" ]; then
       echo "Error: No agent OVE ISO found matching ${iso_name} in ${base_dir}" >&2
@@ -290,7 +314,7 @@ function force_mirror_disconnect() {
 }
 
 function disable_automated_installation() {
-  local agent_iso_abs_path="$(realpath "${OCP_DIR}/agent.$(uname -p).iso")"
+  local agent_iso_abs_path="$(realpath "${OCP_DIR}/agent.${ARCH}.iso")"
   local ign_temp_path="$(mktemp --directory)"
   _tmpfiles="$_tmpfiles $ign_temp_path"
   echo "Extracting ISO ignition..."
@@ -565,6 +589,7 @@ case "${AGENT_E2E_TEST_BOOT_MODE}" in
 
     attach_agent_iso master $NUM_MASTERS
     attach_agent_iso worker $NUM_WORKERS
+    attach_agent_iso arbiter $NUM_ARBITERS
 
     ;;
 
@@ -574,6 +599,7 @@ case "${AGENT_E2E_TEST_BOOT_MODE}" in
 
     agent_pxe_boot master $NUM_MASTERS
     agent_pxe_boot worker $NUM_WORKERS
+    agent_pxe_boot arbiter $NUM_ARBITERS
     ;;
 
   "ISCSI" )
@@ -584,10 +610,12 @@ case "${AGENT_E2E_TEST_BOOT_MODE}" in
 
     agent_iscsi_targets master $NUM_MASTERS
     agent_iscsi_targets worker $NUM_WORKERS
+    agent_iscsi_targets arbiter $NUM_ARBITERS
 
     # Update the nodes and restart
     agent_iscsi_update_nodes master $NUM_MASTERS
     agent_iscsi_update_nodes worker $NUM_WORKERS
+    agent_iscsi_update_nodes arbiter $NUM_ARBITERS
     ;;
 
   "DISKIMAGE" )
@@ -602,6 +630,7 @@ case "${AGENT_E2E_TEST_BOOT_MODE}" in
     # Attach the diskimage to nodes
     attach_appliance_diskimage master $NUM_MASTERS
     attach_appliance_diskimage worker $NUM_WORKERS
+    attach_appliance_diskimage arbiter $NUM_ARBITERS
 
     # Delete the unused appliance.raw file and cache/temp directories
     # (to avoid storage overconsumption on the CI machine)
@@ -625,48 +654,27 @@ case "${AGENT_E2E_TEST_BOOT_MODE}" in
 
     attach_agent_iso_no_registry master $NUM_MASTERS
     attach_agent_iso_no_registry worker $NUM_WORKERS
+    attach_agent_iso_no_registry arbiter $NUM_ARBITERS
 
     echo "Waiting for 2 mins to arrive at agent-tui screen"
     sleep 120
     automate_rendezvousIP_selection master $NUM_MASTERS
     automate_rendezvousIP_selection worker $NUM_WORKERS
+    automate_rendezvousIP_selection arbiter $NUM_ARBITERS
 
     check_assisted_install_UI
 
-    # Temporarily create a dummy kubeconfig and kubeadmin-password file for the CI
-    auth_dir=$SCRIPTDIR/$OCP_DIR/auth
-    mkdir -p $auth_dir
-    cfg=$auth_dir/kubeconfig 
-    cat << EOF >> ${cfg}
-clusters:
-- cluster:
-    certificate-authority-data: LS0tLS1CRUdJTiBGSUNBVLS0tLQo=
-    server: https://api.test.redhat.com:6443
-  name: test
-contexts:
-- context:
-    cluster: test
-    user: admin
-  name: admin
-current-context: admin
-preferences: {}
-users:
-- name: admin
-  user:
-    client-certificate-data: LS0tLS1CRUdJTiBNBVEUtLS0tLQo=
-    client-key-data: LS0tLS1CRUdJTiURSBVktLS0tLQo=
-EOF
-    echo "dummy-kubeadmin-password" > $auth_dir/kubeadmin-password
+    mkdir -p $OCP_DIR/auth
+    rendezvousIP=$(getRendezvousIP)
+    get_vips
+    # Simulate user actions as done on the webUI and start cluster installation
+    ocp_dir_abs_path="$(realpath "${OCP_DIR}")"
+    pushd agent/isobuilder/ui_driven_cluster_installation
+    CLUSTER_NAME=$CLUSTER_NAME BASE_DOMAIN=$BASE_DOMAIN RENDEZVOUS_IP=$rendezvousIP OCP_DIR=$ocp_dir_abs_path INGRESS_VIP=$INGRESS_VIPS API_VIP=$API_VIPS SSH_PUB_KEY=$SSH_PUB_KEY go run main.go
+    popd
+    exit 0
     ;;
 esac
-
-if [[ "${AGENT_E2E_TEST_BOOT_MODE}" == "ISO_NO_REGISTRY" ]]; then
-    # Current goal is to only verify if the nodes are booted fine,
-    # TUI sets the rendezvous IP correctly and UI is accessible.
-    # The next goal is to simulate adding the cluster details via UI
-    # and complete the cluster installation.
-    exit 0
-fi
 
 if [ ! -z "${AGENT_TEST_CASES:-}" ]; then
   run_agent_test_cases

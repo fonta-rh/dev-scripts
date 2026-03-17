@@ -22,9 +22,16 @@ export ISCSI_NETWORK="iscsi"
 export ISCSI_NETWORK_SUBNET=${ISCSI_NETWORK_SUBNET:-"192.168.145"}
 export ISCSI_DEVICE_NAME=${ISCSI_DEVICE_NAME:-"/dev/sdb"}
 
-# Image reference for OpenShift-based Appliance Builder.
-# See: https://github.com/openshift/appliance
-export APPLIANCE_IMAGE=${APPLIANCE_IMAGE:-"quay.io/edge-infrastructure/openshift-appliance:latest"}
+# For OVE CI jobs, this config var may be provided directly as a dependency by the test.
+# If set, it will be used by the build_ove_iso_script. Such feature will be mainly used
+# to test the Appliance repo in the Prow CI.
+if [ "${AGENT_E2E_TEST_BOOT_MODE}" == "ISO_NO_REGISTRY" ]; then
+    export APPLIANCE_IMAGE=${APPLIANCE_IMAGE:-""}
+else
+    # Image reference for OpenShift-based Appliance Builder.
+    # See: https://github.com/openshift/appliance
+    export APPLIANCE_IMAGE=${APPLIANCE_IMAGE:-"quay.io/edge-infrastructure/openshift-appliance:latest"}
+fi
 
 # Override command name in case of extraction
 export OPENSHIFT_INSTALLER_CMD="openshift-install"
@@ -74,8 +81,27 @@ export AGENT_NODE0_IPSV6=${AGENT_NODE0_IPSV6:-}
 # Modifies the baremetal network to be fully isolated.
 export AGENT_ISOLATED_NETWORK=${AGENT_ISOLATED_NETWORK:-"false"}
 
-# Set isolated network to true for truely disconnected OVE env
-# in case of agent ISO with no registry 
 if [ "${AGENT_E2E_TEST_BOOT_MODE}" == "ISO_NO_REGISTRY" ] ; then
+    # Set isolated network to true for truly disconnected OVE env
+    # in case of agent ISO with no registry
     export AGENT_ISOLATED_NETWORK=true
+    # ISO_NO_REGISTRY mode doesn't pre-configure IPs, so nodes use DHCP
+    # Make sure the hosts file reflects the DHCP IP range
+    if [[ -z "${NETWORKING_MODE}" ]]; then
+        export NETWORKING_MODE="DHCP"
+    fi
 fi
+
+function getRendezvousIP() {
+    node_zero_mac_address=$(sudo virsh domiflist ${AGENT_RENDEZVOUS_NODE_HOSTNAME} | awk '$3 == "ostestbm" {print $5}')
+    rendezvousIP=$(ip neigh | grep $node_zero_mac_address | awk '{print $1}')
+    echo $rendezvousIP
+}
+
+function getAgentISOBuilderImage() {
+    full_ocp_version=$(skopeo inspect --authfile $PULL_SECRET_FILE docker://$OPENSHIFT_RELEASE_IMAGE | jq -r '.Labels["io.openshift.release"]')
+    major_minor_patch_version=$(echo "\"$full_ocp_version\"" | jq -r 'split("-")[0]')
+    major_minor_version=$(echo $major_minor_patch_version | cut -d'.' -f1,2 )
+    agent_iso_builder_image="registry.ci.openshift.org/ocp/${major_minor_version}:agent-iso-builder"
+    echo ${agent_iso_builder_image}
+}
