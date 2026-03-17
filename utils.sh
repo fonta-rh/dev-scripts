@@ -374,6 +374,7 @@ function sync_repo_and_patch {
     REPO_BRANCH=${!REPO_BRANCH_VAR:-$(git remote show origin | sed -n '/HEAD branch/s/.*: //p')}
 
     git am --abort || true
+    git checkout -- . || true
     git checkout ${REPO_BRANCH}
     git fetch origin
     git rebase origin/${REPO_BRANCH}
