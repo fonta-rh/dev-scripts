@@ -25,10 +25,10 @@ ansible-playbook \
     -e "num_masters=$NUM_MASTERS" \
     -e "num_workers=$NUM_WORKERS" \
     -e "num_extraworkers=$NUM_EXTRA_WORKERS" \
+    -e "num_armworkers=$NUM_ARM_WORKERS" \
     -e "virthost=$HOSTNAME" \
     -e "manage_baremetal=$MANAGE_BR_BRIDGE" \
     -e "nodes_file=$NODES_FILE" \
-    $ALMA_PYTHON_OVERRIDE \
     -i ${VM_SETUP_PATH}/inventory.ini \
     -b -vvv ${VM_SETUP_PATH}/teardown-playbook.yml
 
